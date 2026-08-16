@@ -1,0 +1,8 @@
+mediapipe==0.10.14
+opencv-python
+pandas
+numpy
+scikit-learn
+torch
+tqdm
+gTTS
