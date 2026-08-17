@@ -7,9 +7,14 @@ Extrae landmarks de mano (MediaPipe) de un dataset de imágenes organizado como:
 
 Genera un CSV con 63 features (21 landmarks x,y,z normalizados) + columna label.
 
-Nota: se confirmó con muestras reales del dataset (letras y números 0 y 8)
-que todas las señas de ASL-HG se representan con 1 sola mano -- por eso el
-extractor está pensado para 1 mano, no 2.
+Nota: la clase "0" fue excluida del dataset. Se determinó (con el notebook
+mediapipe_diagnostic.ipynb) que esa seña se forma con 2 manos superpuestas
+(una plana de fondo, otra formando el círculo), y ni con max_num_hands=2
+la detección resultaba confiable de forma consistente -- la mayoría de las
+imágenes detectaban solo 1 mano, y a veces era la mano equivocada (la de
+fondo, no la que forma la seña). Con esa clase afuera, ninguna otra seña
+del dataset requiere 2 manos, así que el extractor vuelve a la versión
+simple de 1 mano.
 
 Uso:
     python extract_landmarks.py --input "data/asl_dataset" --output "data/landmarks/landmarks.csv"
@@ -65,9 +70,6 @@ class LandmarkExtractor:
         Normaliza los 21 landmarks (x, y, z) para que el modelo sea invariante a:
           - posición de la mano en el frame (traslación)
           - distancia de la mano a la cámara (escala)
-
-        Paso 1: restar la posición de la muñeca (landmark 0) a todos los puntos.
-        Paso 2: dividir por la distancia muñeca -> nudillo del dedo medio (landmark 9).
         """
         coords = [(lm.x, lm.y, lm.z) for lm in landmarks.landmark]
         wrist = coords[0]
@@ -84,9 +86,8 @@ class LandmarkExtractor:
 
     def extract_from_image(self, image_bgr) -> list[float] | None:
         """
-        Recibe una imagen BGR (como la devuelve cv2.imread o una webcam),
-        devuelve el vector normalizado de 63 features, o None si no se
-        detectó ninguna mano.
+        Recibe una imagen BGR, devuelve el vector normalizado de 63 features,
+        o None si no se detectó ninguna mano.
         """
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         results = self._hands.process(image_rgb)
@@ -102,10 +103,14 @@ class LandmarkExtractor:
             return None
         return self.extract_from_image(image)
 
-    def process_dataset(self, input_dir: Path, output_path: Path) -> dict:
-        letter_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir()])
+    def process_dataset(self, input_dir: Path, output_path: Path, exclude: set[str] | None = None) -> dict:
+        exclude = exclude or set()
+
+        letter_dirs = sorted(
+            d for d in input_dir.iterdir() if d.is_dir() and d.name not in exclude
+        )
         if not letter_dirs:
-            raise SystemExit(f"No se encontraron subcarpetas en {input_dir}")
+            raise SystemExit(f"No se encontraron subcarpetas en {input_dir} (después de excluir {exclude})")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +164,12 @@ def main():
     parser.add_argument("--input", required=True, help="Carpeta raíz del dataset (data/asl_dataset)")
     parser.add_argument("--output", required=True, help="Ruta del CSV de salida")
     parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=["0"],
+        help="Nombres de carpetas/clases a excluir (default: '0')",
+    )
+    parser.add_argument(
         "--min-detection-confidence",
         type=float,
         default=0.5,
@@ -167,7 +178,9 @@ def main():
     args = parser.parse_args()
 
     with LandmarkExtractor(min_detection_confidence=args.min_detection_confidence) as extractor:
-        stats = extractor.process_dataset(Path(args.input), Path(args.output))
+        stats = extractor.process_dataset(
+            Path(args.input), Path(args.output), exclude=set(args.exclude)
+        )
 
     print_summary(stats)
 
