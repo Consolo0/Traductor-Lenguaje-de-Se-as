@@ -9,7 +9,7 @@ pip install -r requirements.txt
 
 echo.
 echo === Extrayend
-python models\LandmarkExtractor.py --inputo landmarks === "data\asl_dataset" --output "data\landmarks\landmarks.csv"
+python models\LandmarkExtractor.py --input landmarks === "data\asl_dataset" --output "data\landmarks\landmarks.csv"
 
 echo.
 echo === Listo ===
