@@ -1,5 +1,5 @@
 """
-Extrae landmarks de mano (MediaPipe) de un dataset de imágenes organizado como:
+Extrae landmarks de mano (MediaPipe Tasks API) de un dataset organizado como:
 
     data/asl_dataset/<letra_o_numero>/imagen1.jpeg
     data/asl_dataset/<letra_o_numero>/imagen2.jpeg
@@ -7,14 +7,17 @@ Extrae landmarks de mano (MediaPipe) de un dataset de imágenes organizado como:
 
 Genera un CSV con 63 features (21 landmarks x,y,z normalizados) + columna label.
 
-Nota: la clase "0" fue excluida del dataset. Se determinó (con el notebook
-mediapipe_diagnostic.ipynb) que esa seña se forma con 2 manos superpuestas
-(una plana de fondo, otra formando el círculo), y ni con max_num_hands=2
-la detección resultaba confiable de forma consistente -- la mayoría de las
-imágenes detectaban solo 1 mano, y a veces era la mano equivocada (la de
-fondo, no la que forma la seña). Con esa clase afuera, ninguna otra seña
-del dataset requiere 2 manos, así que el extractor vuelve a la versión
-simple de 1 mano.
+IMPORTANTE: requiere el archivo de modelo hand_landmarker.task en la misma
+carpeta que este script (o pasar --model-path con la ruta correcta).
+Se descarga de:
+https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+
+Por qué la Tasks API y no mp.solutions: la API "Legacy Solutions"
+(mp.solutions.hands) está descontinuada por Google desde 2023, y las
+versiones recientes de mediapipe (0.10.30+, 1.0.x) directamente le sacaron
+el atributo -- por eso el AttributeError que veníamos teniendo. La Tasks
+API (mp.tasks.vision) es la que Google mantiene activamente y funciona
+con cualquier mediapipe reciente, sin pelear con versiones.
 
 Uso:
     python extract_landmarks.py --input "data/asl_dataset" --output "data/landmarks/landmarks.csv"
@@ -26,6 +29,8 @@ from pathlib import Path
 
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision
 from tqdm import tqdm
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -33,7 +38,8 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 class LandmarkExtractor:
     """
-    Encapsula la extracción y normalización de landmarks de mano con MediaPipe.
+    Encapsula la extracción y normalización de landmarks de mano con la
+    Tasks API de MediaPipe.
 
     Se usa como clase (y no funciones sueltas) porque la misma instancia se
     va a reusar en realtime_infer.py para procesar frames de la webcam en
@@ -47,13 +53,20 @@ class LandmarkExtractor:
         + [f"z{i}" for i in range(21)]
     )
 
-    def __init__(self, max_num_hands: int = 1, min_detection_confidence: float = 0.5, static_image_mode: bool = True):
-        self._mp_hands = mp.solutions.hands
-        self._hands = self._mp_hands.Hands(
-            static_image_mode=static_image_mode,
-            max_num_hands=max_num_hands,
-            min_detection_confidence=min_detection_confidence,
+    def __init__(
+        self,
+        model_path: str = "hand_landmarker.task",
+        max_num_hands: int = 1,
+        min_detection_confidence: float = 0.5,
+    ):
+        base_options = mp_python.BaseOptions(model_asset_path=model_path)
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,  # modo imagen suelta (no video/stream)
+            num_hands=max_num_hands,
+            min_hand_detection_confidence=min_detection_confidence,
         )
+        self._landmarker = vision.HandLandmarker.create_from_options(options)
 
     def __enter__(self):
         return self
@@ -62,16 +75,20 @@ class LandmarkExtractor:
         self.close()
 
     def close(self):
-        self._hands.close()
+        self._landmarker.close()
 
     @staticmethod
     def _normalize(landmarks) -> list[float]:
         """
-        Normaliza los 21 landmarks (x, y, z) para que el modelo sea invariante a:
+        landmarks: lista de 21 objetos NormalizedLandmark (con .x, .y, .z),
+        tal como los devuelve la Tasks API -- ya no vienen envueltos en
+        un ".landmark" como en la API vieja.
+
+        Normaliza para que el modelo sea invariante a:
           - posición de la mano en el frame (traslación)
           - distancia de la mano a la cámara (escala)
         """
-        coords = [(lm.x, lm.y, lm.z) for lm in landmarks.landmark]
+        coords = [(lm.x, lm.y, lm.z) for lm in landmarks]
         wrist = coords[0]
 
         translated = [(x - wrist[0], y - wrist[1], z - wrist[2]) for x, y, z in coords]
@@ -86,16 +103,19 @@ class LandmarkExtractor:
 
     def extract_from_image(self, image_bgr) -> list[float] | None:
         """
-        Recibe una imagen BGR, devuelve el vector normalizado de 63 features,
-        o None si no se detectó ninguna mano.
+        Recibe una imagen BGR (como la devuelve cv2.imread o una webcam),
+        devuelve el vector normalizado de 63 features, o None si no se
+        detectó ninguna mano.
         """
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        results = self._hands.process(image_rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
 
-        if not results.multi_hand_landmarks:
+        result = self._landmarker.detect(mp_image)
+
+        if not result.hand_landmarks:
             return None
 
-        return self._normalize(results.multi_hand_landmarks[0])
+        return self._normalize(result.hand_landmarks[0])
 
     def extract_from_path(self, image_path: Path) -> list[float] | None:
         image = cv2.imread(str(image_path))
@@ -164,6 +184,11 @@ def main():
     parser.add_argument("--input", required=True, help="Carpeta raíz del dataset (data/asl_dataset)")
     parser.add_argument("--output", required=True, help="Ruta del CSV de salida")
     parser.add_argument(
+        "--model-path",
+        default="hand_landmarker.task",
+        help="Ruta al archivo de modelo hand_landmarker.task (default: en la misma carpeta)",
+    )
+    parser.add_argument(
         "--exclude",
         nargs="*",
         default=["0"],
@@ -173,11 +198,14 @@ def main():
         "--min-detection-confidence",
         type=float,
         default=0.5,
-        help="Umbral de confianza de detección de MediaPipe (default 0.5)",
+        help="Umbral de confianza de detección (default 0.5)",
     )
     args = parser.parse_args()
 
-    with LandmarkExtractor(min_detection_confidence=args.min_detection_confidence) as extractor:
+    with LandmarkExtractor(
+        model_path=args.model_path,
+        min_detection_confidence=args.min_detection_confidence,
+    ) as extractor:
         stats = extractor.process_dataset(
             Path(args.input), Path(args.output), exclude=set(args.exclude)
         )
