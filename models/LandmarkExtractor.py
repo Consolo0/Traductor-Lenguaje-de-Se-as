@@ -80,6 +80,32 @@ class LandmarkExtractor:
             return None
         return self.extract_from_image(image)
 
+    def process_frame_for_display(self, image_bgr):
+        """
+        Pensado para realtime_infer.py: corre la detección UNA sola vez
+        y devuelve tanto los landmarks normalizados (para el modelo) como
+        el frame con los landmarks dibujados encima (para mostrarle al
+        usuario), evitando correr MediaPipe dos veces por frame.
+        """
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        results = self._hands.process(image_rgb)
+
+        annotated_bgr = image_bgr.copy()
+        features = None
+
+        if results.multi_hand_landmarks:
+            hand_landmarks = results.multi_hand_landmarks[0]
+            features = self._normalize(hand_landmarks)
+            mp.solutions.drawing_utils.draw_landmarks(
+                annotated_bgr,
+                hand_landmarks,
+                self._mp_hands.HAND_CONNECTIONS,
+                mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
+                mp.solutions.drawing_styles.get_default_hand_connections_style(),
+            )
+
+        return annotated_bgr, features
+
     def process_dataset(self, input_dir: Path, output_path: Path, exclude: set[str] | None = None) -> dict:
         exclude = exclude or set()
 
