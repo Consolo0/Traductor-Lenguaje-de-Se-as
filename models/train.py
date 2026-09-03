@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 
 
 class SignMLP(nn.Module):
@@ -84,6 +84,28 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs: int, lr: float, d
     return model
 
 
+def print_top_confusions(y_test, preds, label_encoder, top_n: int = 15):
+    """
+    Muestra los pares (clase_real -> clase_predicha) que más se confunden
+    entre sí, ordenados de mayor a menor cantidad de casos. Ignora la
+    diagonal de la matriz de confusión (los aciertos).
+    """
+    labels = label_encoder.classes_
+    cm = confusion_matrix(y_test, preds, labels=range(len(labels)))
+
+    confusions = []
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            if i != j and cm[i, j] > 0:
+                confusions.append((cm[i, j], labels[i], labels[j]))
+
+    confusions.sort(reverse=True)
+
+    print(f"\n=== Top {top_n} confusiones (real -> predicho) ===")
+    for count, real, pred in confusions[:top_n]:
+        print(f"  {real} -> {pred}: {count} casos")
+
+
 def evaluate(model, X_test, y_test, label_encoder, device: str):
     model.eval()
     X_test_t = torch.tensor(X_test, dtype=torch.float32, device=device)
@@ -99,6 +121,8 @@ def evaluate(model, X_test, y_test, label_encoder, device: str):
     )
     print("=== Reporte por clase (precision / recall / f1) ===")
     print(report)
+
+    print_top_confusions(y_test, preds, label_encoder)
 
     return acc
 
