@@ -1,12 +1,14 @@
 @echo off
 cd /d "%~dp0"
 
-echo === Instalando dependencias en el venv ===
-venv\Scripts\python.exe -m pip install -r requirements.txt
+set PYTHON_EXE=c:\Users\conso\AppData\Local\Programs\Python\Python312\python.exe
+
+echo === Instalando dependencias ===
+"%PYTHON_EXE%" -m pip install -r requirements.txt
 
 echo.
 echo === Extrayendo landmarks ===
-venv\Scripts\python.exe models\LandmarkExtractor.py --input "data\asl_dataset" --output "data\landmarks\landmarks.csv"
+"%PYTHON_EXE%" models\LandmarkExtractor.py --input "data\asl_dataset" --output "data\landmarks\landmarks.csv"
 
 echo.
 echo === Listo ===
