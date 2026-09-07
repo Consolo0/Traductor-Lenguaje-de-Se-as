@@ -119,7 +119,10 @@ def main():
 
     print("Traductor iniciado. Presioná 'q' para salir. Ver controles en el encabezado del script.")
 
-    with LandmarkExtractor(min_detection_confidence=args.min_detection_confidence) as extractor:
+    with LandmarkExtractor(
+        min_detection_confidence=args.min_detection_confidence,
+        static_image_mode=False,  # video: usa tracking entre frames, no detección desde cero c/u
+    ) as extractor:
         current_pred, current_conf = None, 0.0
 
         while True:
