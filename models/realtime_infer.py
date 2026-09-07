@@ -8,7 +8,7 @@ Controles:
     x       -> agregar un espacio al texto (separador de palabras)
     c       -> limpiar todo el texto
     s       -> reproducir el texto acumulado como audio (TTS, en memoria, sin generar mp3)
-    q       -> salirs
+    q       -> salir
 
 La letra/número se agrega SOLO al texto automáticamente: sostené la seña
 sin moverla durante --hold-seconds (default 0.8s) y se confirma sola.
@@ -26,7 +26,7 @@ import json
 import sys
 import time
 from pathlib import Path
-import pygame
+
 import cv2
 import torch
 
@@ -39,6 +39,12 @@ try:
     from gtts import gTTS
 except ImportError:
     gTTS = None
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
 
 def load_model(model_path: Path, classes_path: Path, device: str):
     with open(classes_path) as f:
@@ -127,18 +133,21 @@ class HoldConfirmer:
         return min(elapsed / self.hold_seconds, 1.0)
 
 
-def speak(text: str):
+def speak(text: str) -> bool:
     """
     Genera el audio con gTTS directo en memoria (io.BytesIO, sin tocar
     disco) y lo reproduce con pygame -- no se abre ninguna app externa
     ni queda ningún .mp3 dando vueltas.
+
+    Devuelve True si el audio se generó y reprodujo, False si no había
+    nada que decir o faltan librerías (para no borrar el texto en esos casos).
     """
     if not text.strip():
         print("(nada para reproducir todavía)")
-        return
+        return False
     if gTTS is None or pygame is None:
         print("Falta instalar gTTS y/o pygame: pip install gTTS pygame")
-        return
+        return False
 
     print(f"Generando audio para: '{text}'")
     tts = gTTS(text=text, lang="es")
@@ -155,6 +164,8 @@ def speak(text: str):
 
     while pygame.mixer.music.get_busy():
         pygame.time.wait(100)
+
+    return True
 
 
 def main():
@@ -251,7 +262,8 @@ def main():
                 accumulated_text = ""
                 print("Texto limpiado.")
             elif key == ord("s"):
-                speak(accumulated_text)
+                if speak(accumulated_text):
+                    accumulated_text = ""
 
     cap.release()
     cv2.destroyAllWindows()
