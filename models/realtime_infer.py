@@ -5,7 +5,7 @@ Controles:
     a       -> modo alfabético (solo letras A-Z)
     n       -> modo numérico (solo números 1-9)
     b       -> borrar el último carácter (backspace)
-    x       -> agregar un espacio al texto (separador de palabras)
+    x       -> agregar un espacio manual al texto
     c       -> limpiar todo el texto
     s       -> reproducir el texto acumulado como audio (TTS, en memoria, sin generar mp3)
     q       -> salir
@@ -13,8 +13,11 @@ Controles:
 La letra/número se agrega SOLO al texto automáticamente: sostené la seña
 sin moverla durante --hold-seconds (default 0.8s) y se confirma sola.
 Para repetir la misma letra dos veces seguidas (ej. "SS"), soltá la mano
-o cambiá de seña brevemente entre una y otra -- si no, se interpreta
-como "seguís sosteniendo la misma", no como dos confirmaciones distintas.
+o cambiá de seña brevemente entre una y otra.
+
+El espacio también se agrega automáticamente: si no se detecta ninguna
+mano durante --space-gap-seconds (default 1.5s), se interpreta como que
+bajaste la mano para separar palabras.
 
 Uso:
     python realtime_infer.py --model "mlp_model.pt" --classes "mlp_model.classes.json"
@@ -81,14 +84,13 @@ def predict(model, features, device, allowed_idx):
 
 class HoldConfirmer:
     """
-    Reemplaza la confirmación manual (ESPACIO) por una automática basada
-    en tiempo: si la misma predicción se mantiene estable por
-    `hold_seconds`, se considera "confirmada".
+    Confirma una letra/número automáticamente cuando la misma predicción
+    se mantiene estable por `hold_seconds`.
 
-    Para evitar que sostener la mano quieta 3 segundos agregue la misma
-    letra varias veces, una vez confirmada una predicción hay que ver
-    OTRA predicción (o ninguna) antes de poder volver a confirmar esa
-    misma letra.
+    Para evitar que sostener la mano quieta varios segundos agregue la
+    misma letra repetidas veces, una vez confirmada una predicción hay
+    que ver OTRA predicción (o ninguna) antes de poder volver a
+    confirmar esa misma letra.
     """
 
     def __init__(self, hold_seconds: float):
@@ -98,17 +100,9 @@ class HoldConfirmer:
         self._last_confirmed = None
 
     def update(self, current_pred):
-        """
-        current_pred: la letra/número predicho este frame, o None si no
-        hay predicción confiable.
-
-        Devuelve la letra a confirmar/agregar este frame, o None si
-        todavía no corresponde confirmar nada.
-        """
         now = time.time()
 
         if current_pred != self._stable_pred:
-            # cambió la predicción (o se perdió la mano) -> reiniciar el conteo
             self._stable_pred = current_pred
             self._stable_since = now
             if current_pred is None:
@@ -126,11 +120,54 @@ class HoldConfirmer:
         return None
 
     def progress(self) -> float:
-        """Fracción [0, 1] de cuánto falta para confirmar (para mostrar en pantalla)."""
         if self._stable_pred is None or self._stable_since is None:
             return 0.0
         elapsed = time.time() - self._stable_since
         return min(elapsed / self.hold_seconds, 1.0)
+
+
+class AutoSpacer:
+    """
+    Inserta un espacio automáticamente cuando no se detecta ninguna mano
+    durante `gap_seconds` -- bajar/alejar la mano de la cámara entre
+    palabras sirve como señal de "fin de palabra", sin necesidad de
+    entrenar el modelo con una clase "espacio" inventada.
+
+    Solo inserta UN espacio por cada ausencia de mano.
+    """
+
+    def __init__(self, gap_seconds: float):
+        self.gap_seconds = gap_seconds
+        self._hand_absent_since = None
+        self._space_inserted_for_this_gap = False
+
+    def update(self, hand_present: bool, text_so_far: str) -> bool:
+        if hand_present:
+            self._hand_absent_since = None
+            self._space_inserted_for_this_gap = False
+            return False
+
+        now = time.time()
+        if self._hand_absent_since is None:
+            self._hand_absent_since = now
+            return False
+
+        elapsed = now - self._hand_absent_since
+        should_add = (
+            elapsed >= self.gap_seconds
+            and not self._space_inserted_for_this_gap
+            and bool(text_so_far)
+            and not text_so_far.endswith(" ")
+        )
+        if should_add:
+            self._space_inserted_for_this_gap = True
+        return should_add
+
+    def progress(self) -> float:
+        if self._hand_absent_since is None or self._space_inserted_for_this_gap:
+            return 0.0
+        elapsed = time.time() - self._hand_absent_since
+        return min(elapsed / self.gap_seconds, 1.0)
 
 
 def speak(text: str) -> bool:
@@ -176,6 +213,8 @@ def main():
     parser.add_argument("--min-model-confidence", type=float, default=0.6)
     parser.add_argument("--hold-seconds", type=float, default=0.8,
                          help="Segundos que hay que sostener una seña estable para confirmarla (default 0.8)")
+    parser.add_argument("--space-gap-seconds", type=float, default=1.5,
+                         help="Segundos sin mano detectada para insertar un espacio automático (default 1.5)")
     parser.add_argument("--camera-index", type=int, default=0)
     args = parser.parse_args()
 
@@ -183,6 +222,7 @@ def main():
     model, classes = load_model(Path(args.model), Path(args.classes), device)
     masks = build_mode_masks(classes)
     confirmer = HoldConfirmer(hold_seconds=args.hold_seconds)
+    auto_spacer = AutoSpacer(gap_seconds=args.space_gap_seconds)
 
     mode = "alpha"
     accumulated_text = ""
@@ -192,6 +232,8 @@ def main():
         raise SystemExit(f"No se pudo abrir la cámara (index={args.camera_index})")
 
     print("Traductor iniciado. Presioná 'q' para salir. Ver controles en el encabezado del script.")
+
+    cv2.namedWindow("Traductor de senas", cv2.WINDOW_NORMAL)
 
     with LandmarkExtractor(
         min_detection_confidence=args.min_detection_confidence,
@@ -205,6 +247,7 @@ def main():
 
             frame = cv2.flip(frame, 1)
             annotated, features = extractor.process_frame_for_display(frame)
+            hand_present = features is not None
 
             current_pred, current_conf = None, 0.0
             if features is not None:
@@ -217,6 +260,10 @@ def main():
             if confirmed is not None:
                 accumulated_text += confirmed
                 print(f"Agregado: '{confirmed}' -> texto: '{accumulated_text}'")
+
+            if auto_spacer.update(hand_present, accumulated_text):
+                accumulated_text += " "
+                print(f"Espacio automático -> texto: '{accumulated_text}'")
 
             # --- overlay ---
             h, w = annotated.shape[:2]
@@ -235,11 +282,17 @@ def main():
             cv2.putText(annotated, pred_text, (10, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-            # barra de progreso de "sostener para confirmar"
+            # barra verde: progreso de "sostener para confirmar" letra/número
             progress = confirmer.progress()
             bar_w = int(200 * progress)
             cv2.rectangle(annotated, (10, 65), (210, 75), (80, 80, 80), 1)
             cv2.rectangle(annotated, (10, 65), (10 + bar_w, 75), (0, 220, 0), -1)
+
+            # barra naranja: progreso de "sin mano -> espacio automático"
+            space_progress = auto_spacer.progress()
+            space_bar_w = int(200 * space_progress)
+            cv2.rectangle(annotated, (220, 65), (420, 75), (80, 80, 80), 1)
+            cv2.rectangle(annotated, (220, 65), (220 + space_bar_w, 75), (0, 165, 255), -1)
 
             cv2.putText(annotated, f"Texto: {accumulated_text}", (10, 100),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
