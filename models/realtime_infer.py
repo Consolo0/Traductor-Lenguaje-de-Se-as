@@ -10,200 +10,32 @@ Controles:
     s       -> reproducir el texto acumulado como audio (TTS, en memoria, sin generar mp3)
     q       -> salir
 
-La letra/número se agrega SOLO al texto automáticamente: sostené la seña
-sin moverla durante --hold-seconds (default 0.8s) y se confirma sola.
-Para repetir la misma letra dos veces seguidas (ej. "SS"), soltá la mano
-o cambiá de seña brevemente entre una y otra.
+La letra/número y el espacio se agregan automáticamente -- ver
+sign_app/HoldConfirmer.py y sign_app/AutoSpacer.py.
 
-El espacio también se agrega automáticamente: si no se detecta ninguna
-mano durante --space-gap-seconds (default 1.5s), se interpreta como que
-bajaste la mano para separar palabras.
+Este archivo es solo el "punto de composición": arma las piezas
+(clasificador, comportamientos de entrada, speaker, renderer) y corre
+el loop de la cámara. Para agregar un comportamiento nuevo, no hace
+falta tocar este archivo más que por la lista `behaviors` de abajo --
+la lógica va en su propia clase dentro de sign_app/.
 
 Uso:
     python realtime_infer.py --model "mlp_model.pt" --classes "mlp_model.classes.json"
 """
 
 import argparse
-import io
-import json
 import sys
-import time
 from pathlib import Path
 
 import cv2
-import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from LandmarkExtractor import LandmarkExtractor
-from train import SignMLP
-
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
-
-try:
-    import pygame
-except ImportError:
-    pygame = None
-
-
-def load_model(model_path: Path, classes_path: Path, device: str):
-    with open(classes_path) as f:
-        classes = json.load(f)
-
-    model = SignMLP(input_dim=63, n_classes=len(classes))
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-
-    return model, classes
-
-
-def build_mode_masks(classes: list[str]):
-    numeric_idx = [i for i, c in enumerate(classes) if c.isdigit()]
-    alpha_idx = [i for i, c in enumerate(classes) if c.isalpha()]
-    return {"numeric": numeric_idx, "alpha": alpha_idx}
-
-
-def predict(model, features, device, allowed_idx):
-    x = torch.tensor([features], dtype=torch.float32, device=device)
-    with torch.no_grad():
-        logits = model(x)[0]
-
-    masked_logits = torch.full_like(logits, float("-inf"))
-    masked_logits[allowed_idx] = logits[allowed_idx]
-
-    probs = torch.softmax(masked_logits, dim=0)
-    pred_idx = int(torch.argmax(probs).item())
-    confidence = float(probs[pred_idx].item())
-
-    return pred_idx, confidence
-
-
-class HoldConfirmer:
-    """
-    Confirma una letra/número automáticamente cuando la misma predicción
-    se mantiene estable por `hold_seconds`.
-
-    Para evitar que sostener la mano quieta varios segundos agregue la
-    misma letra repetidas veces, una vez confirmada una predicción hay
-    que ver OTRA predicción (o ninguna) antes de poder volver a
-    confirmar esa misma letra.
-    """
-
-    def __init__(self, hold_seconds: float):
-        self.hold_seconds = hold_seconds
-        self._stable_pred = None
-        self._stable_since = None
-        self._last_confirmed = None
-
-    def update(self, current_pred):
-        now = time.time()
-
-        if current_pred != self._stable_pred:
-            self._stable_pred = current_pred
-            self._stable_since = now
-            if current_pred is None:
-                self._last_confirmed = None  # soltó la mano -> permite repetir letra
-            return None
-
-        if current_pred is None:
-            return None
-
-        held_for = now - self._stable_since
-        if held_for >= self.hold_seconds and current_pred != self._last_confirmed:
-            self._last_confirmed = current_pred
-            return current_pred
-
-        return None
-
-    def progress(self) -> float:
-        if self._stable_pred is None or self._stable_since is None:
-            return 0.0
-        elapsed = time.time() - self._stable_since
-        return min(elapsed / self.hold_seconds, 1.0)
-
-
-class AutoSpacer:
-    """
-    Inserta un espacio automáticamente cuando no se detecta ninguna mano
-    durante `gap_seconds` -- bajar/alejar la mano de la cámara entre
-    palabras sirve como señal de "fin de palabra", sin necesidad de
-    entrenar el modelo con una clase "espacio" inventada.
-
-    Solo inserta UN espacio por cada ausencia de mano.
-    """
-
-    def __init__(self, gap_seconds: float):
-        self.gap_seconds = gap_seconds
-        self._hand_absent_since = None
-        self._space_inserted_for_this_gap = False
-
-    def update(self, hand_present: bool, text_so_far: str) -> bool:
-        if hand_present:
-            self._hand_absent_since = None
-            self._space_inserted_for_this_gap = False
-            return False
-
-        now = time.time()
-        if self._hand_absent_since is None:
-            self._hand_absent_since = now
-            return False
-
-        elapsed = now - self._hand_absent_since
-        should_add = (
-            elapsed >= self.gap_seconds
-            and not self._space_inserted_for_this_gap
-            and bool(text_so_far)
-            and not text_so_far.endswith(" ")
-        )
-        if should_add:
-            self._space_inserted_for_this_gap = True
-        return should_add
-
-    def progress(self) -> float:
-        if self._hand_absent_since is None or self._space_inserted_for_this_gap:
-            return 0.0
-        elapsed = time.time() - self._hand_absent_since
-        return min(elapsed / self.gap_seconds, 1.0)
-
-
-def speak(text: str) -> bool:
-    """
-    Genera el audio con gTTS directo en memoria (io.BytesIO, sin tocar
-    disco) y lo reproduce con pygame -- no se abre ninguna app externa
-    ni queda ningún .mp3 dando vueltas.
-
-    Devuelve True si el audio se generó y reprodujo, False si no había
-    nada que decir o faltan librerías (para no borrar el texto en esos casos).
-    """
-    if not text.strip():
-        print("(nada para reproducir todavía)")
-        return False
-    if gTTS is None or pygame is None:
-        print("Falta instalar gTTS y/o pygame: pip install gTTS pygame")
-        return False
-
-    print(f"Generando audio para: '{text}'")
-    tts = gTTS(text=text, lang="es")
-
-    buffer = io.BytesIO()
-    tts.write_to_fp(buffer)
-    buffer.seek(0)
-
-    if not pygame.mixer.get_init():
-        pygame.mixer.init()
-
-    pygame.mixer.music.load(buffer, "mp3")  # "mp3" como hint de formato, no hay archivo real
-    pygame.mixer.music.play()
-
-    while pygame.mixer.music.get_busy():
-        pygame.time.wait(100)
-
-    return True
+from sign_app.FrameAnalyzer import LandmarkExtractor
+from sign_app.SignModelLogic import SignClassifier
+from sign_app.ConditionEvaluators import HoldConfirmer, AutoSpacer
+from sign_app.Audio import GttsPygameSpeaker
+from sign_app.ScreenLogic import OverlayRenderer
 
 
 def main():
@@ -212,18 +44,23 @@ def main():
     parser.add_argument("--classes", default="mlp_model.classes.json")
     parser.add_argument("--min-detection-confidence", type=float, default=0.5)
     parser.add_argument("--min-model-confidence", type=float, default=0.6)
-    parser.add_argument("--hold-seconds", type=float, default=0.8,
-                         help="Segundos que hay que sostener una seña estable para confirmarla (default 0.8)")
-    parser.add_argument("--space-gap-seconds", type=float, default=1.5,
-                         help="Segundos sin mano detectada para insertar un espacio automático (default 1.5)")
+    parser.add_argument("--hold-seconds", type=float, default=0.8)
+    parser.add_argument("--space-gap-seconds", type=float, default=1.5)
     parser.add_argument("--camera-index", type=int, default=0)
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, classes = load_model(Path(args.model), Path(args.classes), device)
-    masks = build_mode_masks(classes)
-    confirmer = HoldConfirmer(hold_seconds=args.hold_seconds)
-    auto_spacer = AutoSpacer(gap_seconds=args.space_gap_seconds)
+    classifier = SignClassifier.SignClassifier(Path(args.model), Path(args.classes))
+    speaker = GttsPygameSpeaker.GttsPygameSpeaker(lang="es")
+    renderer = OverlayRenderer.OverlayRenderer(panel_height=110)
+
+    # Comportamientos automáticos de entrada de texto. Para agregar uno
+    # nuevo: crear la clase en su propio archivo dentro de sign_app/
+    # (heredando de InputBehavior) y agregar la instancia acá -- nada
+    # más cambia.
+    behaviors = [
+        HoldConfirmer.HoldConfirmer(hold_seconds=args.hold_seconds),
+        AutoSpacer.AutoSpacer(gap_seconds=args.space_gap_seconds),
+    ]
 
     mode = "alpha"
     accumulated_text = ""
@@ -232,11 +69,10 @@ def main():
     if not cap.isOpened():
         raise SystemExit(f"No se pudo abrir la cámara (index={args.camera_index})")
 
-    print("Traductor iniciado. Presioná 'q' para salir. Ver controles en el encabezado del script.")
-
+    print("Traductor iniciado. Presioná 'q' para salir.")
     cv2.namedWindow("Traductor de senas", cv2.WINDOW_NORMAL)
 
-    with LandmarkExtractor(
+    with LandmarkExtractor.LandmarkExtractor(
         min_detection_confidence=args.min_detection_confidence,
         static_image_mode=False,
     ) as extractor:
@@ -252,59 +88,21 @@ def main():
 
             current_pred, current_conf = None, 0.0
             if features is not None:
-                pred_idx, confidence = predict(model, features, device, masks[mode])
+                label, confidence = classifier.predict(features, mode)
                 current_conf = confidence
                 if confidence >= args.min_model_confidence:
-                    current_pred = classes[pred_idx]
+                    current_pred = label
 
-            confirmed = confirmer.update(current_pred)
-            if confirmed is not None:
-                accumulated_text += confirmed
-                print(f"Agregado: '{confirmed}' -> texto: '{accumulated_text}'")
-
-            if auto_spacer.update(hand_present, accumulated_text):
-                accumulated_text += " "
-                print(f"Espacio automático -> texto: '{accumulated_text}'")
-
-            # --- panel de info SEPARADO arriba del video, no encima ---
-            # (antes dibujábamos el panel tapando los primeros ~110px del
-            # frame real de la cámara; ahora armamos un lienzo más alto y
-            # el video de la cámara queda completo, sin nada tapado)
-            INFO_HEIGHT = 110
-            h, w = annotated.shape[:2]
-            canvas = np.zeros((h + INFO_HEIGHT, w, 3), dtype=np.uint8)
-            canvas[INFO_HEIGHT:, :] = annotated  # el video va debajo, intacto
-            info_panel = canvas[:INFO_HEIGHT, :]
-            info_panel[:] = (30, 30, 30)
+            for behavior in behaviors:
+                action = behavior.update(hand_present, current_pred, accumulated_text)
+                if action is not None:
+                    accumulated_text += action.text_delta
+                    print(f"[{behavior.label}] -> texto: '{accumulated_text}'")
 
             mode_label = "ALFABETICO (A-Z)" if mode == "alpha" else "NUMERICO (1-9)"
-            cv2.putText(info_panel, f"Modo: {mode_label}", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-            if current_pred is not None:
-                pred_text = f"Deteccion: {current_pred}  ({current_conf*100:.0f}%)"
-                color = (0, 220, 0)
-            else:
-                pred_text = f"Deteccion: --  ({current_conf*100:.0f}%)"
-                color = (0, 0, 220)
-            cv2.putText(info_panel, pred_text, (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-            # barra verde: progreso de "sostener para confirmar" letra/número
-            progress = confirmer.progress()
-            bar_w = int(200 * progress)
-            cv2.rectangle(info_panel, (10, 65), (210, 75), (80, 80, 80), 1)
-            cv2.rectangle(info_panel, (10, 65), (10 + bar_w, 75), (0, 220, 0), -1)
-
-            # barra naranja: progreso de "sin mano -> espacio automático"
-            space_progress = auto_spacer.progress()
-            space_bar_w = int(200 * space_progress)
-            cv2.rectangle(info_panel, (220, 65), (420, 75), (80, 80, 80), 1)
-            cv2.rectangle(info_panel, (220, 65), (220 + space_bar_w, 75), (0, 165, 255), -1)
-
-            cv2.putText(info_panel, f"Texto: {accumulated_text}", (10, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-
+            canvas = renderer.render(
+                annotated, mode_label, current_pred, current_conf, behaviors, accumulated_text
+            )
             cv2.imshow("Traductor de senas", canvas)
 
             key = cv2.waitKey(1) & 0xFF
@@ -323,7 +121,7 @@ def main():
                 accumulated_text = ""
                 print("Texto limpiado.")
             elif key == ord("s"):
-                if speak(accumulated_text):
+                if speaker.speak(accumulated_text):
                     accumulated_text = ""
 
     cap.release()

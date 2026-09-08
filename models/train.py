@@ -13,36 +13,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
-
-
-class SignMLP(nn.Module):
-    """
-    MLP simple: 63 features de entrada (21 landmarks x,y,z) -> letra/número.
-
-    Arquitectura chica a propósito: el problema es fácil una vez que ya
-    tenemos landmarks limpios (no imágenes crudas), así que no hace falta
-    una red grande -- una red grande acá arriesgaría overfitting sin
-    ninguna ganancia real de capacidad.
-    """
-
-    def __init__(self, input_dim: int, n_classes: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, n_classes),
-        )
-
-    def forward(self, x):
-        return self.net(x)
+import torch.nn as nn
+from sign_app.SignModelLogic import SignMLP
 
 
 def load_data(csv_path: Path):
