@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -265,12 +266,19 @@ def main():
                 accumulated_text += " "
                 print(f"Espacio automático -> texto: '{accumulated_text}'")
 
-            # --- overlay ---
+            # --- panel de info SEPARADO arriba del video, no encima ---
+            # (antes dibujábamos el panel tapando los primeros ~110px del
+            # frame real de la cámara; ahora armamos un lienzo más alto y
+            # el video de la cámara queda completo, sin nada tapado)
+            INFO_HEIGHT = 110
             h, w = annotated.shape[:2]
-            cv2.rectangle(annotated, (0, 0), (w, 110), (30, 30, 30), -1)
+            canvas = np.zeros((h + INFO_HEIGHT, w, 3), dtype=np.uint8)
+            canvas[INFO_HEIGHT:, :] = annotated  # el video va debajo, intacto
+            info_panel = canvas[:INFO_HEIGHT, :]
+            info_panel[:] = (30, 30, 30)
 
             mode_label = "ALFABETICO (A-Z)" if mode == "alpha" else "NUMERICO (1-9)"
-            cv2.putText(annotated, f"Modo: {mode_label}", (10, 25),
+            cv2.putText(info_panel, f"Modo: {mode_label}", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             if current_pred is not None:
@@ -279,25 +287,25 @@ def main():
             else:
                 pred_text = f"Deteccion: --  ({current_conf*100:.0f}%)"
                 color = (0, 0, 220)
-            cv2.putText(annotated, pred_text, (10, 55),
+            cv2.putText(info_panel, pred_text, (10, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             # barra verde: progreso de "sostener para confirmar" letra/número
             progress = confirmer.progress()
             bar_w = int(200 * progress)
-            cv2.rectangle(annotated, (10, 65), (210, 75), (80, 80, 80), 1)
-            cv2.rectangle(annotated, (10, 65), (10 + bar_w, 75), (0, 220, 0), -1)
+            cv2.rectangle(info_panel, (10, 65), (210, 75), (80, 80, 80), 1)
+            cv2.rectangle(info_panel, (10, 65), (10 + bar_w, 75), (0, 220, 0), -1)
 
             # barra naranja: progreso de "sin mano -> espacio automático"
             space_progress = auto_spacer.progress()
             space_bar_w = int(200 * space_progress)
-            cv2.rectangle(annotated, (220, 65), (420, 75), (80, 80, 80), 1)
-            cv2.rectangle(annotated, (220, 65), (220 + space_bar_w, 75), (0, 165, 255), -1)
+            cv2.rectangle(info_panel, (220, 65), (420, 75), (80, 80, 80), 1)
+            cv2.rectangle(info_panel, (220, 65), (220 + space_bar_w, 75), (0, 165, 255), -1)
 
-            cv2.putText(annotated, f"Texto: {accumulated_text}", (10, 100),
+            cv2.putText(info_panel, f"Texto: {accumulated_text}", (10, 100),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            cv2.imshow("Traductor de senas", annotated)
+            cv2.imshow("Traductor de senas", canvas)
 
             key = cv2.waitKey(1) & 0xFF
 
